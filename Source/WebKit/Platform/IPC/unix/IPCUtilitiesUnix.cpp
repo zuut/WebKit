@@ -31,9 +31,24 @@
 
 namespace IPC {
 
+#if OS(DARWIN)
+// The default buffer sizes of AF_UNIX datagram sockets on Darwin (2048 bytes for sending
+// and 4096 for receiving, see net.local.dgram.maxdgram) are too small for IPC messages,
+// which are up to 4096 bytes without counting attachments: sendmsg() fails with EMSGSIZE
+// and the message is dropped.
+static constexpr int datagramSocketBufferSize = 256 * 1024;
+#endif
+
 SocketPair createPlatformConnection(int socketType, unsigned options)
 {
     std::array<int, 2> sockets;
+
+#if OS(DARWIN)
+    // SOCK_SEQPACKET is defined on Darwin, but socketpair() does not support it for AF_UNIX
+    // (it fails with EPROTONOSUPPORT). Fall back to SOCK_DGRAM like ConnectionUnix does.
+    if (socketType == SOCK_SEQPACKET)
+        socketType = SOCK_DGRAM;
+#endif
 
 #if OS(LINUX)
     if ((options & SetCloexecOnServer) || (options & SetCloexecOnClient)) {
@@ -49,6 +64,15 @@ SocketPair createPlatformConnection(int socketType, unsigned options)
 #endif
 
     RELEASE_ASSERT(socketpair(AF_UNIX, socketType, 0, sockets.data()) != -1);
+
+#if OS(DARWIN)
+    if (socketType == SOCK_DGRAM) {
+        for (int socket : sockets) {
+            RELEASE_ASSERT(!setsockopt(socket, SOL_SOCKET, SO_SNDBUF, &datagramSocketBufferSize, sizeof(datagramSocketBufferSize)));
+            RELEASE_ASSERT(!setsockopt(socket, SOL_SOCKET, SO_RCVBUF, &datagramSocketBufferSize, sizeof(datagramSocketBufferSize)));
+        }
+    }
+#endif
 
     if (options & SetCloexecOnServer)
         RELEASE_ASSERT(setCloseOnExec(sockets[1]));
